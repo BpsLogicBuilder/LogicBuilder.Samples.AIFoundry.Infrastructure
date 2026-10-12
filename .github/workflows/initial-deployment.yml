@@ -52,12 +52,12 @@ jobs:
         client-id: ${{ secrets.CROSS_REPO_ACCESS_APP_CLIENT_ID }}
         private-key: ${{ secrets.CROSS_REPO_ACCESS_APP_PRIVATE_KEY }}
 
-    - name: Checkout Second Repository
+    - name: Checkout Bicep Repository
       uses: actions/checkout@v6
       with:
         repository: BpsLogicBuilder/Bicep
         token: ${{ steps.repo-access-app-token.outputs.token }}
-        path: mcp-server-function-app
+        path: temp_bicep_folder
 
     - name: Login to Azure
       uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
@@ -77,7 +77,7 @@ jobs:
           echo "function_app_name=$FUNCTION_APP_NAME" >> $GITHUB_OUTPUT
 
     - name: 'Publish Project'
-      run: dotnet publish ./mcp-server-function-app/csharp-mcp-server-function.csproj --configuration Release --output ./publish_output
+      run: dotnet publish ./temp_bicep_folder/mcp-server-function-app/csharp-mcp-server-function.csproj --configuration Release --output ./publish_output 
 
     - name: 'Deploy to Azure Functions'
       uses: Azure/functions-action@c5060b3b8bb1ebbcb531abd00c822ecbaa8ea656
@@ -129,7 +129,7 @@ jobs:
         BLOB_CONTAINER_NAME: ${{ steps.get_deployment_outputs.outputs.blob_container_name }}
         UPLOAD_FOLDER: './publish_output'
       run: |
-          az storage blob upload-batch --destination "$BLOB_CONTAINER_NAME" --source "$UPLOAD_FOLDER" --connection-string "$BLOB_CONNECTION_STRING"
+          az storage blob upload-batch --destination "$BLOB_CONTAINER_NAME" --source ${{ env.UPLOAD_FOLDER }} --connection-string "$BLOB_CONNECTION_STRING"
 
   create-knowledgebase-and-knowledge-store:
     name: Create Knowledge base
@@ -163,6 +163,9 @@ jobs:
 
           SEARCH_ENDPOINT=$(az resource show --ids "$SEARCH_ID" --query "properties.endpoint" --output tsv)
           echo "::add-mask::$SEARCH_ENDPOINT"
+
+          STORAGE_ID=$(az deployment group show --resource-group ${{ env.RESOURCE_GROUP }} --name main --query properties.outputs.resources.value.documentStorage -o tsv)
+          echo "::add-mask::$STORAGE_ID"
 
           BLOB_CONNECTION_STRING=$(az storage account show-connection-string --ids $STORAGE_ID -o tsv)
           echo "::add-mask::$BLOB_CONNECTION_STRING"
