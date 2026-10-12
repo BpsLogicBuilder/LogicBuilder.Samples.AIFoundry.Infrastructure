@@ -39,6 +39,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    needs: deploy-foundry-and-resources
 
     steps:
     - name: Checkout repository
@@ -92,6 +93,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    needs: deploy-foundry-and-resources
 
     steps:
     - name: Checkout repository
@@ -135,6 +137,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    needs: deploy-foundry-and-resources
 
     steps:
     - name: Checkout repository
