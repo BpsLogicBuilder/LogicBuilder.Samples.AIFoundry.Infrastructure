@@ -1,0 +1,269 @@
+on: [workflow_dispatch]
+name: Deploy Foundry Infrastructure and Apps
+
+jobs:
+  deploy-foundry-and-resources:
+    name: Deploy Foundry
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Login to Azure
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+      with:
+        client-id: ${{ secrets.ARM_DEPLOYER_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Deploy Infrastructure
+      uses: azure/arm-deploy@v1
+      env:
+        GREETER_FUNCTION_CLIENT_SECRET: ${{ secrets.GREETER_FUNCTION_CLIENT_SECRET }}
+      with:
+        scope: resourcegroup
+        subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        resourceGroupName: ${{ secrets.AZURE_RG_FOUNDRY_IQ }}
+        parameters: functionAuthClientSecret="${{ env.GREETER_FUNCTION_CLIENT_SECRET }}"
+        template: ./main.bicep
+        failOnStdErr: false
+
+  deploy-function-app-mcp-tool:
+    name: Deploy MCP Tool
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Generate GitHub App Token
+      id: repo-access-app-token
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ secrets.CROSS_REPO_ACCESS_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CROSS_REPO_ACCESS_APP_PRIVATE_KEY }}
+
+    - name: Checkout Second Repository
+      uses: actions/checkout@v6
+      with:
+        repository: BpsLogicBuilder/Bicep
+        token: ${{ steps.repo-access-app-token.outputs.token }}
+        path: mcp-server-function-app
+
+    - name: Login to Azure
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+      with:
+        client-id: ${{ secrets.ARM_DEPLOYER_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Get Deployment Outputs
+      id: get_deployment_outputs
+      env:
+        RESOURCE_GROUP: ${{ secrets.AZURE_RG_FOUNDRY_IQ }}
+      run: |
+          FUNCTION_APP_NAME=$(az deployment group show --resource-group ${{ env.RESOURCE_GROUP }} --name main --query properties.outputs.resources.value.functionAppName -o tsv)
+          echo "::add-mask::$FUNCTION_APP_NAME"
+
+          echo "function_app_name=$FUNCTION_APP_NAME" >> $GITHUB_OUTPUT
+
+    - name: 'Publish Project'
+      run: dotnet publish ./mcp-server-function-app/csharp-mcp-server-function.csproj --configuration Release --output ./publish_output
+
+    - name: 'Deploy to Azure Functions'
+      uses: Azure/functions-action@c5060b3b8bb1ebbcb531abd00c822ecbaa8ea656
+      env:
+        FUNCTION_APP_NAME: ${{ steps.get_deployment_outputs.outputs.function_app_name }}
+      with:
+        app-name: ${{ env.FUNCTION_APP_NAME }}
+        package: './publish_output'
+
+  upload-foundry-iq-documents:
+    name: Upload Foundry IQ Documents
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Login to Azure
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+      with:
+        client-id: ${{ secrets.ARM_DEPLOYER_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Get Deployment Outputs
+      id: get_deployment_outputs
+      env:
+        RESOURCE_GROUP: ${{ secrets.AZURE_RG_FOUNDRY_IQ }}
+      run: |
+          STORAGE_ID=$(az deployment group show --resource-group ${{ env.RESOURCE_GROUP }} --name main --query properties.outputs.resources.value.documentStorage -o tsv)
+          echo "::add-mask::$STORAGE_ID"
+
+          BLOB_CONNECTION_STRING=$(az storage account show-connection-string --ids $STORAGE_ID -o tsv)
+          echo "::add-mask::$BLOB_CONNECTION_STRING"
+
+          BLOB_CONTAINER_NAME="contosoproducts"
+          echo "::add-mask::$BLOB_CONTAINER_NAME"
+
+          echo "blob_connection_string=$BLOB_CONNECTION_STRING" >> $GITHUB_OUTPUT
+          echo "blob_container_name=$BLOB_CONTAINER_NAME" >> $GITHUB_OUTPUT
+
+    - name: Upload blob files
+      env:
+        BLOB_CONNECTION_STRING: ${{ steps.get_deployment_outputs.outputs.blob_connection_string }}
+        BLOB_CONTAINER_NAME: ${{ steps.get_deployment_outputs.outputs.blob_container_name }}
+        UPLOAD_FOLDER: './publish_output'
+      run: |
+          az storage blob upload-batch --destination "$BLOB_CONTAINER_NAME" --source "$UPLOAD_FOLDER" --connection-string "$BLOB_CONNECTION_STRING"
+
+  create-knowledgebase-and-knowledge-store:
+    name: Create Knowledge base
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+
+    - name: Login to Azure
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5
+      with:
+        client-id: ${{ secrets.ARM_DEPLOYER_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Get Deployment Outputs
+      id: get_deployment_outputs
+      env:
+        RESOURCE_GROUP: ${{ secrets.AZURE_RG_FOUNDRY_IQ }}
+      run: |
+          SEARCH_TOKEN=$(az account get-access-token --scope https://search.azure.com/.default --query accessToken -o tsv)
+          echo "::add-mask::$SEARCH_TOKEN"
+
+          SEARCH_ID=$(az deployment group show --resource-group ${{ env.RESOURCE_GROUP }} --name main --query properties.outputs.resources.value.searchService --output tsv)
+          echo "::add-mask::$SEARCH_ID"
+
+          SEARCH_ENDPOINT=$(az resource show --ids "$SEARCH_ID" --query "properties.endpoint" --output tsv)
+          echo "::add-mask::$SEARCH_ENDPOINT"
+
+          BLOB_CONNECTION_STRING=$(az storage account show-connection-string --ids $STORAGE_ID -o tsv)
+          echo "::add-mask::$BLOB_CONNECTION_STRING"
+
+          API_VERSION="2026-08-01-preview"
+          echo "::add-mask::$API_VERSION"
+
+          EMBEDDING_MODEL_DEPLOYMENT="text-embedding-3-small"
+          echo "::add-mask::$EMBEDDING_MODEL_DEPLOYMENT"
+
+          BLOB_CONTAINER_NAME="contosoproducts"
+          echo "::add-mask::$BLOB_CONTAINER_NAME"
+
+          FOUNDRY_ACCOUNT_RESOURCE_NAME=$(az deployment group show --resource-group ${{ env.RESOURCE_GROUP }} --name main --query properties.outputs.resources.value.foundryAccountResourceName --output tsv)
+          echo "::add-mask::$FOUNDRY_ACCOUNT_RESOURCE_NAME"
+
+          OPEN_AI_ENDPOINT="https://${FOUNDRY_ACCOUNT_RESOURCE_NAME}.openai.azure.com/"
+          echo "::add-mask::$OPEN_AI_ENDPOINT"
+
+          echo "search_endpoint=$SEARCH_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "blob_connection_string=$BLOB_CONNECTION_STRING" >> $GITHUB_OUTPUT
+          echo "blob_container_name=$BLOB_CONTAINER_NAME" >> $GITHUB_OUTPUT
+          echo "api_version=$API_VERSION" >> $GITHUB_OUTPUT
+          echo "embedding_model_deployment=$EMBEDDING_MODEL_DEPLOYMENT" >> $GITHUB_OUTPUT
+          echo "open_ai_endpoint=$OPEN_AI_ENDPOINT" >> $GITHUB_OUTPUT
+
+    - name: Create Knowledge Source
+      env:
+        SEARCH_ENDPOINT: ${{ steps.get_deployment_outputs.outputs.search_endpoint }}
+        BLOB_CONNECTION_STRING: ${{ steps.get_deployment_outputs.outputs.blob_connection_string }}
+        BLOB_CONTAINER_NAME: ${{ steps.get_deployment_outputs.outputs.blob_container_name }}
+        API_VERSION: ${{ steps.get_deployment_outputs.outputs.api_version }}
+        EMBEDDING_MODEL_DEPLOYMENT: ${{ steps.get_deployment_outputs.outputs.embedding_model_deployment }}
+        OPEN_AI_ENDPOINT: ${{ steps.get_deployment_outputs.outputs.open_ai_endpoint }}
+      run: |
+          az rest --method put \
+          --uri "$SEARCH_ENDPOINT/knowledgesources/ks-contosoproducts?api-version=$API_VERSION" \
+          --headers "Authorization=Bearer $search_token" "Content-Type=application/json" \
+          --body '{
+            "name": "ks-contosoproducts",
+            "description": "Blob storage knowledge source for Foundry IQ agentic retrieval",
+            "kind": "azureBlob",
+            "azureBlobParameters": {
+              "connectionString": "'"$BLOB_CONNECTION_STRING"'",
+              "containerName": "'"$BLOB_CONTAINER_NAME"'",
+              "folderPath": "",
+              "isADLSGen2": false,
+              "ingestionParameters": {
+                "contentExtractionMode": "minimal",
+                "disableImageVerbalization": false,
+                "ingestionPermissionOptions": [],
+                "networkAccessMode": "public",
+                "embeddingModel": {
+                  "kind": "azureOpenAI",
+                  "azureOpenAIParameters": {
+                    "resourceUri": "'"$OPEN_AI_ENDPOINT"'",
+                    "deploymentId": "'"$EMBEDDING_MODEL_DEPLOYMENT"'",
+                    "modelName": "'"$EMBEDDING_MODEL_DEPLOYMENT"'",
+                    "apiKey": null
+                  }
+                },
+                "chatCompletionModel": {
+                  "kind": "azureOpenAI",
+                  "azureOpenAIParameters": {
+                    "resourceUri": "'"$OPEN_AI_ENDPOINT"'",
+                    "deploymentId": "gpt-5.2",
+                    "modelName": "gpt-5.2",
+                    "apiKey": null
+                  }
+                }
+              }
+            }
+          }'
+
+    - name: Create Knowledge Base
+      env:
+        SEARCH_ENDPOINT: ${{ steps.get_deployment_outputs.outputs.search_endpoint }}
+        API_VERSION: ${{ steps.get_deployment_outputs.outputs.api_version }}
+        OPEN_AI_ENDPOINT: ${{ steps.get_deployment_outputs.outputs.open_ai_endpoint }}
+      run: |
+        az rest --method put \
+        --uri "$SEARCH_ENDPOINT/knowledgebases/knowledgebase576?api-version=$API_VERSION" \
+        --headers "Authorization=Bearer $search_token" "Content-Type=application/json" \
+        --body '{
+          "name": "knowledgebase576",
+          "description": "Centralized Foundry IQ Knowledge Base representing unified blob storage data",
+          "outputMode": "extractiveData",
+          "knowledgeSources": [
+            {
+              "name": "ks-contosoproducts"
+            }
+          ],
+          "models": [
+            {
+              "kind": "azureOpenAI",
+              "azureOpenAIParameters": {
+                "resourceUri": "'"$OPEN_AI_ENDPOINT"'",
+                "deploymentId": "gpt-5.2",
+                "modelName": "gpt-5.2",
+                "apiKey": null
+              }
+            }
+          ],
+          "retrievalReasoningEffort": {
+            "kind": "minimal"
+          }
+        }'
